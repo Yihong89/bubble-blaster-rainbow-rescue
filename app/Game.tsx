@@ -28,6 +28,7 @@ type Bubble = {
 type GameApi = {
   reset: () => void;
   resume: () => void;
+  setMuted: (value: boolean) => void;
   shoot: () => void;
 };
 
@@ -378,28 +379,174 @@ export default function Game() {
     let streakValue = 0;
     let weaponKick = 0;
     let audioContext: AudioContext | null = null;
+    let musicGain: GainNode | null = null;
+    let musicTimer: number | null = null;
+    let musicStep = 0;
+    let nextMusicNote = 0;
     let touchId: number | null = null;
     let touchX = 0;
     let touchY = 0;
     let touchMoved = false;
+    let draggingMouse = false;
+    let mouseDragX = 0;
+    let mouseDragY = 0;
+    let mouseDragged = false;
+
+    const safelyRequestPointerLock = () => {
+      try {
+        void Promise.resolve(canvas.requestPointerLock()).catch(() => undefined);
+      } catch {
+        // Embedded browsers may not support pointer lock. Drag-to-look remains available.
+      }
+    };
+
+    const ensureAudioContext = () => {
+      audioContext ??= new AudioContext();
+      if (audioContext.state === "suspended") {
+        void audioContext.resume().catch(() => undefined);
+      }
+      return audioContext;
+    };
+
+    const createMusicVoice = (
+      frequency: number,
+      start: number,
+      duration: number,
+      volume: number,
+      type: OscillatorType,
+      detune = 0,
+    ) => {
+      if (!audioContext || !musicGain) return;
+      const oscillator = audioContext.createOscillator();
+      const filter = audioContext.createBiquadFilter();
+      const gain = audioContext.createGain();
+      oscillator.type = type;
+      oscillator.frequency.setValueAtTime(frequency, start);
+      oscillator.detune.setValueAtTime(detune, start);
+      filter.type = "lowpass";
+      filter.frequency.setValueAtTime(type === "square" ? 1650 : 1250, start);
+      gain.gain.setValueAtTime(0.001, start);
+      gain.gain.exponentialRampToValueAtTime(volume, start + 0.014);
+      gain.gain.exponentialRampToValueAtTime(0.001, start + duration);
+      oscillator.connect(filter).connect(gain).connect(musicGain);
+      oscillator.start(start);
+      oscillator.stop(start + duration + 0.03);
+    };
+
+    const createKick = (start: number) => {
+      if (!audioContext || !musicGain) return;
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      oscillator.type = "sine";
+      oscillator.frequency.setValueAtTime(135, start);
+      oscillator.frequency.exponentialRampToValueAtTime(45, start + 0.13);
+      gain.gain.setValueAtTime(0.075, start);
+      gain.gain.exponentialRampToValueAtTime(0.001, start + 0.16);
+      oscillator.connect(gain).connect(musicGain);
+      oscillator.start(start);
+      oscillator.stop(start + 0.18);
+    };
+
+    const createTick = (start: number, accent: boolean) => {
+      if (!audioContext || !musicGain) return;
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      oscillator.type = "square";
+      oscillator.frequency.setValueAtTime(accent ? 1450 : 1900, start);
+      gain.gain.setValueAtTime(accent ? 0.012 : 0.006, start);
+      gain.gain.exponentialRampToValueAtTime(0.001, start + (accent ? 0.075 : 0.035));
+      oscillator.connect(gain).connect(musicGain);
+      oscillator.start(start);
+      oscillator.stop(start + 0.085);
+    };
+
+    const melody = [
+      659.25, 783.99, 880, 783.99,
+      659.25, 587.33, 659.25, 783.99,
+      880, 1046.5, 880, 783.99,
+      659.25, 587.33, 523.25, 587.33,
+    ];
+    const bassLine = [130.81, 174.61, 196, 164.81];
+
+    const scheduleMusicStep = (step: number, start: number) => {
+      const phraseStep = step % 16;
+      if (phraseStep % 2 === 0 || phraseStep === 3 || phraseStep === 11) {
+        const note = melody[phraseStep];
+        createMusicVoice(note, start, 0.19, 0.035, "triangle");
+        createMusicVoice(note * 2, start, 0.105, 0.011, "square", 5);
+      }
+      if (phraseStep % 4 === 0) {
+        createMusicVoice(bassLine[Math.floor(phraseStep / 4)], start, 0.42, 0.052, "triangle");
+      }
+      if (phraseStep === 0 || phraseStep === 8) createKick(start);
+      createTick(start, phraseStep === 4 || phraseStep === 12);
+    };
+
+    const musicScheduler = () => {
+      if (!audioContext || !musicGain || mutedRef.current) return;
+      while (nextMusicNote < audioContext.currentTime + 0.12) {
+        scheduleMusicStep(musicStep, nextMusicNote);
+        musicStep += 1;
+        nextMusicNote += 0.126;
+      }
+    };
+
+    const stopMusic = () => {
+      if (musicTimer !== null) {
+        window.clearInterval(musicTimer);
+        musicTimer = null;
+      }
+      if (audioContext && musicGain) {
+        musicGain.gain.cancelScheduledValues(audioContext.currentTime);
+        musicGain.gain.setTargetAtTime(0.001, audioContext.currentTime, 0.06);
+      }
+    };
+
+    const startMusic = () => {
+      if (mutedRef.current || musicTimer !== null) return;
+      try {
+        const context = ensureAudioContext();
+        if (!musicGain) {
+          musicGain = context.createGain();
+          musicGain.connect(context.destination);
+        }
+        musicGain.gain.cancelScheduledValues(context.currentTime);
+        musicGain.gain.setTargetAtTime(0.62, context.currentTime, 0.09);
+        musicStep = 0;
+        nextMusicNote = context.currentTime + 0.045;
+        musicScheduler();
+        musicTimer = window.setInterval(musicScheduler, 45);
+      } catch {
+        // The game remains playable when browser audio is unavailable.
+      }
+    };
+
+    const setAudioMuted = (value: boolean) => {
+      mutedRef.current = value;
+      if (value) {
+        stopMusic();
+      } else if (playing) {
+        startMusic();
+      }
+    };
 
     const tone = (frequency: number, endFrequency: number, duration: number, volume: number) => {
       if (mutedRef.current) return;
       try {
-        audioContext ??= new AudioContext();
-        const oscillator = audioContext.createOscillator();
-        const gain = audioContext.createGain();
+        const context = ensureAudioContext();
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
         oscillator.type = "sine";
-        oscillator.frequency.setValueAtTime(frequency, audioContext.currentTime);
+        oscillator.frequency.setValueAtTime(frequency, context.currentTime);
         oscillator.frequency.exponentialRampToValueAtTime(
           endFrequency,
-          audioContext.currentTime + duration,
+          context.currentTime + duration,
         );
-        gain.gain.setValueAtTime(volume, audioContext.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + duration);
-        oscillator.connect(gain).connect(audioContext.destination);
+        gain.gain.setValueAtTime(volume, context.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + duration);
+        oscillator.connect(gain).connect(context.destination);
         oscillator.start();
-        oscillator.stop(audioContext.currentTime + duration);
+        oscillator.stop(context.currentTime + duration);
       } catch {
         // Audio is a bonus; gameplay remains fully available when audio is blocked.
       }
@@ -440,6 +587,7 @@ export default function Game() {
     const finishRound = (reason: "time" | "shield") => {
       if (!playing) return;
       playing = false;
+      stopMusic();
       setEndReason(reason);
       setPhase("ended");
       phaseRef.current = "ended";
@@ -521,6 +669,8 @@ export default function Game() {
       roundStartedAt = performance.now();
       lastFrame = performance.now();
       playing = true;
+      stopMusic();
+      startMusic();
     };
 
     const resume = () => {
@@ -529,9 +679,10 @@ export default function Game() {
       if (pausedAt) roundStartedAt += now - pausedAt;
       lastFrame = now;
       playing = true;
+      startMusic();
     };
 
-    apiRef.current = { reset, resume, shoot };
+    apiRef.current = { reset, resume, setMuted: setAudioMuted, shoot };
 
     const onResize = () => {
       const width = canvas.clientWidth || window.innerWidth;
@@ -571,32 +722,56 @@ export default function Game() {
       }
       if (!playing) return;
       if (document.pointerLockElement !== canvas) {
-        canvas.requestPointerLock();
+        draggingMouse = true;
+        mouseDragX = event.clientX;
+        mouseDragY = event.clientY;
+        mouseDragged = false;
+        canvas.setPointerCapture(event.pointerId);
+        safelyRequestPointerLock();
       } else {
         shoot();
       }
     };
 
     const onCanvasPointerMove = (event: PointerEvent) => {
-      if (event.pointerType !== "touch" || touchId !== event.pointerId || !playing) return;
-      const dx = event.clientX - touchX;
-      const dy = event.clientY - touchY;
-      if (Math.abs(dx) + Math.abs(dy) > 3) touchMoved = true;
-      yaw -= dx * 0.0062;
-      pitch = clamp(pitch - dy * 0.0052, -1.12, 1.06);
-      touchX = event.clientX;
-      touchY = event.clientY;
+      if (!playing) return;
+      if (event.pointerType === "touch" && touchId === event.pointerId) {
+        const dx = event.clientX - touchX;
+        const dy = event.clientY - touchY;
+        if (Math.abs(dx) + Math.abs(dy) > 3) touchMoved = true;
+        yaw -= dx * 0.0062;
+        pitch = clamp(pitch - dy * 0.0052, -1.12, 1.06);
+        touchX = event.clientX;
+        touchY = event.clientY;
+        return;
+      }
+      if (event.pointerType === "mouse" && draggingMouse && document.pointerLockElement !== canvas) {
+        const dx = event.clientX - mouseDragX;
+        const dy = event.clientY - mouseDragY;
+        if (Math.abs(dx) + Math.abs(dy) > 2) mouseDragged = true;
+        yaw -= dx * 0.0062;
+        pitch = clamp(pitch - dy * 0.0052, -1.12, 1.06);
+        mouseDragX = event.clientX;
+        mouseDragY = event.clientY;
+      }
     };
 
     const onCanvasPointerUp = (event: PointerEvent) => {
-      if (event.pointerType !== "touch" || touchId !== event.pointerId) return;
-      if (!touchMoved) shoot();
-      touchId = null;
+      if (event.pointerType === "touch" && touchId === event.pointerId) {
+        if (!touchMoved) shoot();
+        touchId = null;
+        return;
+      }
+      if (event.pointerType === "mouse" && draggingMouse) {
+        if (!mouseDragged) shoot();
+        draggingMouse = false;
+      }
     };
 
     const onPointerLockChange = () => {
       if (document.pointerLockElement !== canvas && playing && phaseRef.current === "playing") {
         playing = false;
+        stopMusic();
         pausedAt = performance.now();
         setPhase("paused");
         phaseRef.current = "paused";
@@ -613,6 +788,7 @@ export default function Game() {
     canvas.addEventListener("pointerdown", onCanvasPointerDown);
     canvas.addEventListener("pointermove", onCanvasPointerMove);
     canvas.addEventListener("pointerup", onCanvasPointerUp);
+    canvas.addEventListener("pointercancel", onCanvasPointerUp);
     canvas.addEventListener("contextmenu", onContextMenu);
 
     const animate = (now: number) => {
@@ -733,8 +909,10 @@ export default function Game() {
       canvas.removeEventListener("pointerdown", onCanvasPointerDown);
       canvas.removeEventListener("pointermove", onCanvasPointerMove);
       canvas.removeEventListener("pointerup", onCanvasPointerUp);
+      canvas.removeEventListener("pointercancel", onCanvasPointerUp);
       canvas.removeEventListener("contextmenu", onContextMenu);
       if (document.pointerLockElement === canvas) document.exitPointerLock();
+      stopMusic();
       renderer.dispose();
       scene.traverse((object) => {
         if (object instanceof THREE.Mesh) {
@@ -751,7 +929,11 @@ export default function Game() {
   const requestPointerLock = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas || window.matchMedia("(pointer: coarse)").matches) return;
-    canvas.requestPointerLock();
+    try {
+      void Promise.resolve(canvas.requestPointerLock()).catch(() => undefined);
+    } catch {
+      // Drag-to-look is used when pointer lock is unavailable.
+    }
   }, []);
 
   const startGame = () => {
@@ -770,6 +952,13 @@ export default function Game() {
 
   const holdKey = (code: string, pressed: boolean) => {
     window.dispatchEvent(new KeyboardEvent(pressed ? "keydown" : "keyup", { code }));
+  };
+
+  const toggleSound = () => {
+    const nextMuted = !mutedRef.current;
+    mutedRef.current = nextMuted;
+    setMuted(nextMuted);
+    apiRef.current?.setMuted(nextMuted);
   };
 
   const heartDisplay = Array.from({ length: 3 }, (_, index) => (
@@ -815,7 +1004,7 @@ export default function Game() {
             type="button"
             className="sound-button"
             aria-label={muted ? "Turn sound on" : "Turn sound off"}
-            onClick={() => setMuted((value) => !value)}
+            onClick={toggleSound}
           >
             {muted ? "♩" : "♪"}
           </button>
