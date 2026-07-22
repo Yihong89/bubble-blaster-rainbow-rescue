@@ -1,6 +1,6 @@
 # Bubble Blaster: Rainbow Rescue
 
-@GeorgeXL26
+[GeorgeXL26](https://github.com/GeoregeXL26)
 
 
 A cheerful, kid-friendly first-person bubble game built with Three.js, React,
