@@ -1,5 +1,8 @@
 # Bubble Blaster: Rainbow Rescue
 
+@GeorgeXL26
+
+
 A cheerful, kid-friendly first-person bubble game built with Three.js, React,
 and vinext. The game contains no graphic violence, ads, sign-in, or external
 game assets.
